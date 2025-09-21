@@ -1,4 +1,3 @@
-// libs/magic-memory-ui/src/lib/screens/GameScreen.tsx
 import { useEffect, useRef, useState, useMemo } from "react";
 import {
   View,
@@ -12,26 +11,30 @@ import {
   Dimensions,
   StyleProp,
   ViewStyle,
+  Platform,
 } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useSound } from "../contexts/SoundContext";
 import * as ScreenOrientation from "expo-screen-orientation";
+import { Audio } from "expo-av";
+import { Asset } from "expo-asset";
 import Confetti from "../components/Confetti";
 import CustomAlert from "../components/CustomAlert";
 import MemoryCard from "../components/Card";
 import { RootParamList, Card } from "../types";
 import { isWeb } from "../utils/config";
 import globalStyles from "../styles/global-styles";
-import BackIcon from "../../icons/BackIcon";
 import styles from "./GameScreen.styles";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
   withRepeat,
+  runOnJS,
 } from "react-native-reanimated";
 import Svg, {
   Defs,
@@ -41,22 +44,38 @@ import Svg, {
 } from "react-native-svg";
 import { usePropConfig } from "../contexts/PropConfigContext";
 
-// уровни
-type LevelKey = 4 | 6 | 8 | 10 | 12;
-
-// утилиты под пропсы
+// ───────────────────────── helpers ─────────────────────────
 const asArray = (val?: string | string[]): string[] | undefined => {
   if (!val) return undefined;
   return Array.isArray(val) ? val : [val];
 };
 const pickRandom = <T,>(arr: T[]): T =>
   arr[Math.floor(Math.random() * arr.length)];
+const shuffle = <T,>(arr: T[]): T[] => {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
 
-// таймеры
+// Нормалізуємо age у "бакет" для сітки/розмірів (4,6,8,10,12)
+const toGridLevel = (age: number): 4 | 6 | 8 | 10 | 12 => {
+  const even = age - (age % 2);
+  const clamped = Math.min(12, Math.max(4, even));
+  return (
+    clamped === 4 || clamped === 6 || clamped === 8 || clamped === 10
+      ? clamped
+      : 12
+  ) as 4 | 6 | 8 | 10 | 12;
+};
+
+// Таймери
 type IntervalId = ReturnType<typeof setInterval>;
 type TimeoutId = ReturnType<typeof setTimeout>;
 
-// иконка для кнопки
+// Иконка PlayAgain (не используем в авто-прогрессе, но пусть будет)
 const PlayIcon = () => (
   <Image
     source={require("../../assets/playAgain.png")}
@@ -64,7 +83,26 @@ const PlayIcon = () => (
   />
 );
 
-// источник картинки у карточки (локальное поле)
+// ---- РОБОТЫ (анимация + голос) ----
+const ROBOT_SPRITES = [
+  require("../../assets/hero/hero1/anim.webp"),
+  require("../../assets/hero/hero2/anim.webp"),
+  require("../../assets/hero/hero3/anim.webp"),
+  require("../../assets/hero/hero4/anim.webp"),
+  require("../../assets/hero/hero5/anim.webp"),
+  require("../../assets/hero/hero6/anim.webp"),
+] as const;
+
+const ROBOT_VOICES = [
+  require("../../assets/hero/hero1/hero.m4a"),
+  require("../../assets/hero/hero2/hero.m4a"),
+  require("../../assets/hero/hero3/hero.m4a"),
+  require("../../assets/hero/hero4/hero.m4a"),
+  require("../../assets/hero/hero5/hero.m4a"),
+  require("../../assets/hero/hero6/hero.m4a"),
+] as const;
+
+// Витягнути джерело лицьової картинки з локального поля
 const getSrc = (c?: Card): string | undefined => {
   const anyCard = c as unknown as { __source?: { uri?: string } | string };
   if (!anyCard || !anyCard.__source) return undefined;
@@ -80,6 +118,8 @@ const GameScreen = () => {
     playSuccessSound,
     playBackgroundMusic,
     stopSuccessSound,
+    // pauseBackgroundMusic, // не используем, музыку не останавливаем
+    // resumeBackgroundMusic,
   } = useSound();
 
   const navigation = useNavigation<NativeStackNavigationProp<RootParamList>>();
@@ -101,14 +141,13 @@ const GameScreen = () => {
     );
   }
 
-  const incomingLevel = (route.params as { level?: number } | undefined)?.level;
-
-  // текущий уровень: приоритет route → props.level
-  const level: LevelKey = useMemo(() => {
-    const raw = (incomingLevel ?? cfg.level) as number;
-    const allowed: LevelKey[] = [4, 6, 8, 10, 12];
-    return (allowed.includes(raw as LevelKey) ? raw : cfg.level) as LevelKey;
-  }, [incomingLevel, cfg.level]);
+  const incomingAge = (route.params as { age?: number } | undefined)?.age;
+  const age = useMemo(
+    () => Math.max(2, incomingAge ?? cfg.age),
+    [incomingAge, cfg.age]
+  );
+  const gridLevel = useMemo(() => toGridLevel(age), [age]); // 4|6|8|10|12
+  const pairsNeeded = useMemo(() => Math.floor(age / 2), [age]);
 
   const [cards, setCards] = useState<Card[]>([]);
   const [selectedCards, setSelectedCards] = useState<number[]>([]);
@@ -132,6 +171,25 @@ const GameScreen = () => {
   const [showPlayAgain, setShowPlayAgain] = useState(false);
   const [isGameActive, setIsGameActive] = useState(true);
 
+  // Дуга — полностью контролируем видимость флагом
+  const [arcVisible, setArcVisible] = useState(false);
+
+  // Робот текущего совпадения + очередь роботов на раунд
+  const [activeRobotIndex, setActiveRobotIndex] = useState<number>(0);
+  const robotsOrderRef = useRef<number[]>([]);
+
+  // Предзагруженные URI голосов роботов
+  const robotVoiceUrisRef = useRef<(string | null)[]>([
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+  ]);
+
+  const { width, height } = Dimensions.get("window");
+
   const arcOffsetY = useSharedValue(0);
   const arcOpacity = useSharedValue(1);
   const statsOffsetY = useSharedValue(0);
@@ -139,10 +197,7 @@ const GameScreen = () => {
   const playAgainScale = useSharedValue(1);
   const playAgainOpacity = useSharedValue(1);
   const hintScale = useSharedValue(1);
-  const backScale = useSharedValue(1);
   const congratsPulse = useSharedValue(1.05);
-
-  const { width, height } = Dimensions.get("window");
 
   const PLAY_AGAIN_OFFSET = 110;
   const PLAY_AGAIN_CAP = 0.78;
@@ -151,26 +206,26 @@ const GameScreen = () => {
     height * 0.6 + PLAY_AGAIN_OFFSET
   );
 
-  // фон/рубашка/лица — только из пропсов
+  // ───────────── фон/рубашка/лиця — только из пропсов ─────────────
   const selectedBackground = useMemo(() => {
     const candidates = asArray(cfg.background);
     const uri =
       candidates && candidates.length > 0 ? pickRandom(candidates) : undefined;
     return uri ? { source: { uri } } : null;
-  }, [cfg.background, level]);
+  }, [cfg.background, gridLevel, age]);
 
   const selectedBack = useMemo(() => {
     const candidates = asArray(cfg.backCardSide);
     const uri =
       candidates && candidates.length > 0 ? pickRandom(candidates) : undefined;
     return uri ? { uri } : null;
-  }, [cfg.backCardSide, level]);
+  }, [cfg.backCardSide, gridLevel, age]);
 
   const externalFrontList: string[] = useMemo(() => {
     return Array.isArray(cfg.frontCardSide) ? cfg.frontCardSide : [];
-  }, [cfg.frontCardSide, level]);
+  }, [cfg.frontCardSide, gridLevel, age]);
 
-  // анимации
+  // ───────────── анімації ─────────────
   const arcAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: arcOffsetY.value }],
     opacity: arcOpacity.value,
@@ -187,20 +242,36 @@ const GameScreen = () => {
     transform: [{ scale: withTiming(hintScale.value, { duration: 100 }) }],
     opacity: 1,
   }));
-  const backAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: withTiming(backScale.value, { duration: 200 }) }],
-    opacity: 1,
-  }));
   const congratsAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: withTiming(congratsPulse.value, { duration: 2000 }) }],
     opacity: 1,
   }));
 
-  // жизненный цикл
+  // ───────────── жизненный цикл ─────────────
   useEffect(() => {
     if (!isWeb) {
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      ScreenOrientation.lockAsync(
+        ScreenOrientation.OrientationLock.LANDSCAPE
+      ).catch(() => {});
     }
+
+    // Предзагружаем голоса роботов (надёжное воспроизведение на Android)
+    (async () => {
+      try {
+        const assets = await Promise.all(
+          ROBOT_VOICES.map(async (mod) => {
+            const a = Asset.fromModule(mod);
+            await a.downloadAsync();
+            return a.localUri ?? a.uri ?? null;
+          })
+        );
+        robotVoiceUrisRef.current = assets;
+      } catch {
+        // если что — fallback потом на notificationSound
+        robotVoiceUrisRef.current = [null, null, null, null, null, null];
+      }
+    })();
+
     if (!isInitialized) {
       generateCards();
       setIsInitialized(true);
@@ -210,7 +281,7 @@ const GameScreen = () => {
       clearInterval(timer.current);
       timer.current = null;
     }
-    if ([8, 10, 12].includes(level)) {
+    if (gridLevel >= 8) {
       playBackgroundMusic().catch(() => {});
       timer.current = setInterval(() => setTime((prev) => prev + 1), 1000);
     }
@@ -228,16 +299,39 @@ const GameScreen = () => {
       if (timer.current) clearInterval(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [level, isInitialized, showCongrats, isGameActive]);
+  }, [gridLevel, isInitialized, showCongrats, isGameActive]);
 
-  // генерация колоды
+  // ───────────── проиграть голос робота (через предзагруженный URI) ─────────────
+  const playRobotVoice = async (idx: number) => {
+    try {
+      const uri = robotVoiceUrisRef.current[idx];
+      if (!uri) throw new Error("no-uri");
+      // гарантируем режим (миксуется с фоном)
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: false,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+      const { sound } = await Audio.Sound.createAsync({ uri });
+      await sound.setVolumeAsync(1.0);
+      await sound.playAsync();
+      setTimeout(() => sound.unloadAsync().catch(() => {}), 2500);
+    } catch {
+      // запасной вариант
+      playNotificationSound().catch(() => {});
+    }
+  };
+
+  // ───────────── генерация колоды ─────────────
   const generateCards = () => {
     if (timer.current) {
       clearInterval(timer.current);
       timer.current = null;
     }
 
-    const pairs = Math.floor(level / 2);
+    const pairs = pairsNeeded;
     const uniqFront = Array.from(new Set(externalFrontList));
     const backOk = !!selectedBack?.uri;
     const bgOk = !!selectedBackground?.source?.uri;
@@ -248,21 +342,23 @@ const GameScreen = () => {
       return;
     }
 
-    // сброс анимаций
-    arcOffsetY.value = height;
-    arcOpacity.value = 0;
+    // Скидываем статистику
     statsOffsetY.value = -100;
     statsOpacity.value = 0;
 
-    // выбрать лица и развернуть в пары
+    // Очерёдность роботов без повторов (если пар больше 6 — зациклим)
+    const base = [0, 1, 2, 3, 4, 5];
+    robotsOrderRef.current = shuffle(base);
+
+    // Выбор лиц и разворот в пары
     const chosen = uniqFront
       .slice()
       .sort(() => Math.random() - 0.5)
       .slice(0, pairs)
-      .map((u) => ({ source: { uri: u } as const }));
+      .map((u) => ({ source: { uri: u } }));
     const selectedValues = chosen.flatMap((x) => [x, x]);
 
-    // карточки (value — муляж, рендер по __source)
+    // Карточки
     const cardPairs: Card[] = selectedValues
       .map((val, index) => ({
         id: index,
@@ -288,13 +384,19 @@ const GameScreen = () => {
     setShowUpgradePrompt(false);
     setIsGameActive(true);
 
-    // входные анимации
+    // Показ дуги (вход) — без лишних тёмных оверлеев
+    // ПЕРЕДВИНУЛИ setArcVisible В КОНЕЦ АНИМАЦИИ
+    arcOffsetY.value = height;
+    arcOpacity.value = 0;
     arcOffsetY.value = withTiming(0, { duration: 500 });
-    arcOpacity.value = withTiming(1, { duration: 500 });
+    arcOpacity.value = withTiming(1, { duration: 500 }, (finished) => {
+      if (finished) runOnJS(setArcVisible)(true); // Включаем дугу только ПОСЛЕ анимации
+    });
     statsOffsetY.value = withTiming(0, { duration: 500 });
     statsOpacity.value = withTiming(1, { duration: 500 });
 
-    if (level === 4) {
+    // Автопоказ для 2x2
+    if (gridLevel === 4) {
       setIsShowingCards(true);
       const showTimer: TimeoutId = setTimeout(() => {
         const updated = cardPairs.map((c) => ({ ...c, isFlipped: true }));
@@ -308,30 +410,24 @@ const GameScreen = () => {
       }, 1000);
       completionTimers.current.push(showTimer);
     }
-    if ([8, 10, 12].includes(level)) {
+
+    if (gridLevel >= 8) {
       playBackgroundMusic().catch(() => {});
       timer.current = setInterval(() => setTime((prev) => prev + 1), 1000);
     }
   };
 
-  const getStars = (lvl: number, t: number, m: number) => {
-    if (![8, 10, 12].includes(lvl)) return 0;
-    let maxTime: number, maxMoves: number;
-    switch (lvl) {
-      case 8:
-        maxTime = 30;
-        maxMoves = 12;
-        break;
-      case 10:
-        maxTime = 40;
-        maxMoves = 18;
-        break;
-      case 12:
-        maxTime = 50;
-        maxMoves = 24;
-        break;
-      default:
-        return 0;
+  // Звёзды — по бакету
+  const getStars = (lvlBucket: 4 | 6 | 8 | 10 | 12, t: number, m: number) => {
+    if (lvlBucket < 8) return 0;
+    let maxTime = 30;
+    let maxMoves = 12;
+    if (lvlBucket === 10) {
+      maxTime = 40;
+      maxMoves = 18;
+    } else if (lvlBucket === 12) {
+      maxTime = 50;
+      maxMoves = 24;
     }
     if (t <= maxTime && m <= maxMoves) return 3;
     if (t <= maxTime * 1.2 && m <= maxMoves * 1.2) return 2;
@@ -356,7 +452,7 @@ const GameScreen = () => {
       prev.map((c) => (c.id === id ? { ...c, isFlipped: true } : c))
     );
 
-    if ([8, 10, 12].includes(level)) setMoves((prev) => prev + 1);
+    if (gridLevel >= 8) setMoves((prev) => prev + 1);
 
     if (newSelected.length === 2) {
       const [firstId, secondId] = newSelected;
@@ -368,7 +464,18 @@ const GameScreen = () => {
       if (same) {
         const matchDelay: TimeoutId = setTimeout(() => {
           if (!isGameActive) return;
-          playNotificationSound().catch(() => {});
+
+          // Выбор робота по порядку совпадений
+          const matchIndex = Math.floor((matchedCards.length + 2) / 2) - 1; // 0-based
+          const order = robotsOrderRef.current.length
+            ? robotsOrderRef.current
+            : [0, 1, 2, 3, 4, 5];
+          const robotIdx = order[matchIndex % order.length];
+          setActiveRobotIndex(robotIdx);
+
+          // Голос робота (не останавливая фон)
+          playRobotVoice(robotIdx).catch(() => {});
+
           const newMatched = [...matchedCards, firstId, secondId];
           setMatchedCards(newMatched);
 
@@ -397,17 +504,20 @@ const GameScreen = () => {
               const newRounds = roundsCompleted + 1;
               setRoundsCompleted(newRounds);
 
-              const starsEarned = getStars(level, time, moves);
+              const starsEarned = getStars(gridLevel, time, moves);
               setTotalStars((prev) => prev + starsEarned);
 
-              const animTimer: TimeoutId = setTimeout(() => {
-                if (!isGameActive) return;
-                arcOffsetY.value = withTiming(height, { duration: 700 });
-                arcOpacity.value = withTiming(0, { duration: 700 });
-                statsOffsetY.value = withTiming(height, { duration: 700 });
-                statsOpacity.value = withTiming(0, { duration: 700 });
-              }, 0);
-              completionTimers.current.push(animTimer);
+              // Уводим дугу вниз и полностью скрываем до следующего уровня (без вспышек)
+              // УБРАЛИ setTimeout — достаточно анимации
+              arcOffsetY.value = withTiming(
+                height,
+                { duration: 700 },
+                (finished) => finished && runOnJS(setArcVisible)(false)
+              );
+              arcOpacity.value = withTiming(0, { duration: 700 });
+              statsOffsetY.value = withTiming(height, { duration: 700 });
+              statsOpacity.value = withTiming(0, { duration: 700 });
+              // Убрали: setTimeout(() => setArcVisible(false), 750);
 
               const congratsTimer: TimeoutId = setTimeout(() => {
                 if (!isGameActive) return;
@@ -416,12 +526,17 @@ const GameScreen = () => {
               }, 900);
               completionTimers.current.push(congratsTimer);
 
-              const playAgainTimer: TimeoutId = setTimeout(() => {
+              // Переход на следующий уровень
+              const nextTimer: TimeoutId = setTimeout(() => {
                 if (!isGameActive) return;
-                setShowPlayAgain(true);
-                if (newRounds >= 5) setShowUpgradePrompt(true);
+                setShowPlayAgain(false);
+                const nextAge = age + 2;
+                const goTimer: TimeoutId = setTimeout(() => {
+                  navigation.replace("MagicMemoryGameScreen", { age: nextAge });
+                }, 400);
+                completionTimers.current.push(goTimer);
               }, 2100);
-              completionTimers.current.push(playAgainTimer);
+              completionTimers.current.push(nextTimer);
             } else {
               setIsFlipping(false);
             }
@@ -485,7 +600,7 @@ const GameScreen = () => {
   };
 
   const getNumColumns = () => {
-    switch (level) {
+    switch (gridLevel) {
       case 4:
         return 2;
       case 6:
@@ -497,12 +612,12 @@ const GameScreen = () => {
       case 12:
         return 6;
       default:
-        return 2;
+        return 3;
     }
   };
 
   const getCardSize = () => {
-    switch (level) {
+    switch (gridLevel) {
       case 4:
         return 120;
       case 6:
@@ -513,7 +628,7 @@ const GameScreen = () => {
       case 12:
         return 100;
       default:
-        return 120;
+        return 110;
     }
   };
 
@@ -574,64 +689,43 @@ const GameScreen = () => {
           />
         )}
 
-        {/* 😄 СМАЙЛ НАД КАРТОЧКОЙ — ВЕРНУЛИ */}
-        {smileVisible === item.id && (
-          <View
-            style={{
-              position: "absolute",
-              left: 46,
-              top: -49,
-              zIndex: 9999,
-              elevation: 50,
-            }}
-            pointerEvents="none"
-            collapsable={false}
-            renderToHardwareTextureAndroid
-            needsOffscreenAlphaCompositing
-          >
-            <Image
-              source={require("../../assets/faceSmile.png")}
-              style={{
-                width: 32,
-                height: 32,
-                opacity: 1,
-                transform: [{ rotate: "0deg" }],
-                resizeMode: "contain",
-              }}
-            />
-          </View>
-        )}
+        {/* 🤖 робот над совпавшей парой */}
+        {smileVisible === item.id &&
+          (() => {
+            const size = Math.round(getCardSize() * 0.34);
+            const left = (getCardSize() - size) / 2;
+            const top = -size - 12;
+
+            return (
+              <View
+                style={{
+                  position: "absolute",
+                  left,
+                  top,
+                  width: size,
+                  height: size,
+                  zIndex: 9999,
+                  elevation: 50,
+                }}
+                pointerEvents="none"
+                collapsable={false}
+                renderToHardwareTextureAndroid
+                needsOffscreenAlphaCompositing
+              >
+                <ExpoImage
+                  source={ROBOT_SPRITES[activeRobotIndex]}
+                  style={{ width: "100%", height: "100%" }}
+                  contentFit="contain"
+                />
+              </View>
+            );
+          })()}
       </View>
     );
   };
 
-  const handleHintPressIn = () => {
-    hintScale.value = 1.1;
-  };
-  const handleHintPressOut = () => {
-    hintScale.value = 1;
-  };
-
-  const handleBackPress = async () => {
-    backScale.value = withTiming(1.1, { duration: 200 }, () => {
-      backScale.value = withTiming(1, { duration: 200 });
-    });
-    try {
-      setIsGameActive(false);
-      if (timer.current) {
-        clearInterval(timer.current);
-        timer.current = null;
-      }
-      completionTimers.current.forEach((t) => clearTimeout(t));
-      completionTimers.current = [];
-      setTotalStars(0);
-      await stopSuccessSound();
-      await new Promise<void>((resolve) => setTimeout(() => resolve(), 100));
-      navigation.goBack();
-    } catch {
-      navigation.goBack();
-    }
-  };
+  const handleHintPressIn = () => (hintScale.value = 1.1);
+  const handleHintPressOut = () => (hintScale.value = 1);
 
   const handlePlayAgainPressIn = () => {
     playAgainScale.value = 1.1;
@@ -640,9 +734,7 @@ const GameScreen = () => {
   const handlePlayAgainPressOut = () => {
     playAgainScale.value = 1;
     playAgainOpacity.value = 1;
-    const t: TimeoutId = setTimeout(() => {
-      handlePlayAgain();
-    }, 300);
+    const t: TimeoutId = setTimeout(() => handlePlayAgain(), 300);
     completionTimers.current.push(t);
   };
 
@@ -653,8 +745,7 @@ const GameScreen = () => {
     generateCards();
   };
 
-  // валидация пропсов
-  const pairsNeeded = Math.floor(level / 2);
+  // Валідація пропсів
   const cfgOk =
     selectedBackground &&
     selectedBack &&
@@ -684,6 +775,8 @@ const GameScreen = () => {
     );
   }
 
+  const { width: W, height: H } = Dimensions.get("window");
+
   return (
     <View style={{ flex: 1, width: "100%", height: "100%" }}>
       <ImageBackground
@@ -695,64 +788,56 @@ const GameScreen = () => {
         resizeMode="cover"
       />
 
-      {/* дуга + бордер */}
-      <Animated.View style={[arcAnimatedStyle, { zIndex: 30 }]}>
-        <Svg
-          height={height}
-          width="100%"
-          style={{ position: "absolute", top: 0, left: 0, zIndex: 5 }}
-          viewBox={`0 0 ${width} ${height}`}
-          preserveAspectRatio="none"
-        >
-          <Defs>
-            <SvgLinearGradient
-              id="arcGrad"
-              x1="0"
-              y1="0"
-              x2="0"
-              y2="1"
-              gradientUnits="objectBoundingBox"
-            >
-              <Stop offset="0" stopColor="#020743" stopOpacity="0.55" />
-              <Stop offset="1" stopColor="#080001" stopOpacity="0.75" />
-            </SvgLinearGradient>
-            <SvgLinearGradient
-              id="arcBorderGrad"
-              x1="0"
-              y1="0.5"
-              x2="1"
-              y2="0.5"
-              gradientUnits="objectBoundingBox"
-            >
-              <Stop offset="0" stopColor="#C57CFF" stopOpacity="0" />
-              <Stop offset="0.3" stopColor="#C57CFF" stopOpacity="1" />
-              <Stop offset="0.7" stopColor="#C57CFF" stopOpacity="1" />
-              <Stop offset="1" stopColor="#C57CFF" stopOpacity="0" />
-            </SvgLinearGradient>
-          </Defs>
-          <Path
-            d={`M0 ${height} L0 100 Q${width / 2} 60 ${width} 100 L${width} ${height} Z`}
-            fill="url(#arcGrad)"
-          />
-          <Path
-            d={`M0 100 Q${width / 2} 60 ${width} 100`}
-            fill="none"
-            stroke="url(#arcBorderGrad)"
-            strokeWidth={4}
-            strokeLinecap="round"
-          />
-        </Svg>
-        <View
-          style={{
-            height: height * 0.4,
-            position: "absolute",
-            bottom: 0,
-            width: "100%",
-            opacity: 0.5,
-            zIndex: 4,
-          }}
-        />
-      </Animated.View>
+      {/* дуга + бордер — только если arcVisible; убран тёмный оверлей */}
+      {arcVisible && (
+        <Animated.View style={[arcAnimatedStyle, { zIndex: 30 }]}>
+          <Svg
+            height={H}
+            width="100%"
+            style={{ position: "absolute", top: 0, left: 0, zIndex: 5 }}
+            viewBox={`0 0 ${W} ${H}`}
+            preserveAspectRatio="none"
+          >
+            <Defs>
+              <SvgLinearGradient
+                id="arcGrad"
+                x1="0"
+                y1="0"
+                x2="0"
+                y2="1"
+                gradientUnits="objectBoundingBox"
+              >
+                <Stop offset="0" stopColor="#020743" stopOpacity="0.55" />
+                <Stop offset="1" stopColor="#080001" stopOpacity="0.75" />
+              </SvgLinearGradient>
+              <SvgLinearGradient
+                id="arcBorderGrad"
+                x1="0"
+                y1="0.5"
+                x2="1"
+                y2="0.5"
+                gradientUnits="objectBoundingBox"
+              >
+                <Stop offset="0" stopColor="#C57CFF" stopOpacity="0" />
+                <Stop offset="0.3" stopColor="#C57CFF" stopOpacity="1" />
+                <Stop offset="0.7" stopColor="#C57CFF" stopOpacity="1" />
+                <Stop offset="1" stopColor="#C57CFF" stopOpacity="0" />
+              </SvgLinearGradient>
+            </Defs>
+            <Path
+              d={`M0 ${H} L0 100 Q${W / 2} 60 ${W} 100 L${W} ${H} Z`}
+              fill="url(#arcGrad)"
+            />
+            <Path
+              d={`M0 100 Q${W / 2} 60 ${W} 100`}
+              fill="none"
+              stroke="url(#arcBorderGrad)"
+              strokeWidth={4}
+              strokeLinecap="round"
+            />
+          </Svg>
+        </Animated.View>
+      )}
 
       <StatusBar hidden />
 
@@ -762,24 +847,13 @@ const GameScreen = () => {
           { flex: 1, width: "100%", opacity: 1, overflow: "visible" },
         ]}
       >
-        {!showPlayAgain && (
-          <Animated.View style={[styles.backButton, backAnimatedStyle]}>
-            <TouchableOpacity
-              onPress={handleBackPress}
-              activeOpacity={0.7}
-              hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
-            >
-              <BackIcon />
-            </TouchableOpacity>
-          </Animated.View>
-        )}
-
+        {/* Hint */}
         {!showPlayAgain && (
           <Animated.View style={[styles.hintButton, hintAnimatedStyle]}>
             <TouchableOpacity
               onPress={handleHint}
-              onPressIn={hintAnimatedStyle as any}
-              onPressOut={hintAnimatedStyle as any}
+              onPressIn={handleHintPressIn}
+              onPressOut={handleHintPressOut}
             >
               <View style={styles.hintGlow}>
                 <View style={styles.hintBorder}>
@@ -795,7 +869,7 @@ const GameScreen = () => {
           </Animated.View>
         )}
 
-        {[8, 10, 12].includes(level) && (
+        {gridLevel >= 8 && (
           <Animated.View
             style={[
               styles.statsPanel,
@@ -845,7 +919,7 @@ const GameScreen = () => {
             }}
           >
             <FlatList
-              key={`flatlist-${level}`}
+              key={`flatlist-${gridLevel}-${age}`}
               data={cards}
               renderItem={renderItem}
               keyExtractor={(item) => item.id.toString()}
@@ -879,12 +953,12 @@ const GameScreen = () => {
           </View>
         )}
 
-        {/* конфетти */}
+        {/* конфетті */}
         <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-          <Confetti isActive={showConfetti} level={level} />
+          <Confetti isActive={showConfetti} level={gridLevel} />
         </View>
 
-        {/* поздравление */}
+        {/* привітання */}
         {showCongrats && (
           <View
             style={[styles.congratsContainer, { zIndex: 3500 }]}
@@ -911,12 +985,22 @@ const GameScreen = () => {
               adjustsFontSizeToFit
               numberOfLines={1}
             >
-              {language === "es" ? "¡Felicidades!" : "Congratulations!"}
+              {language === "es"
+                ? "¡Felicidades!"
+                : language === "pt"
+                  ? "Parabéns!"
+                  : language === "pl"
+                    ? "Gratulacje!"
+                    : language === "uk"
+                      ? "Вітаємо!"
+                      : language === "ru"
+                        ? "Поздравляем!"
+                        : "Congratulations!"}
             </Text>
           </View>
         )}
 
-        {/* кнопка Play Again */}
+        {/* Play Again — отключено в авто-прогрессе */}
         {showPlayAgain && (
           <Animated.View
             style={[
@@ -933,18 +1017,8 @@ const GameScreen = () => {
             ]}
           >
             <TouchableOpacity
-              onPressIn={() => {
-                playAgainScale.value = 1.1;
-                playAgainOpacity.value = 0.8;
-              }}
-              onPressOut={() => {
-                playAgainScale.value = 1;
-                playAgainOpacity.value = 1;
-                const t: TimeoutId = setTimeout(() => {
-                  handlePlayAgain();
-                }, 300);
-                completionTimers.current.push(t);
-              }}
+              onPressIn={handlePlayAgainPressIn}
+              onPressOut={handlePlayAgainPressOut}
               activeOpacity={1}
             >
               <View style={[styles.playAgainGradient, { opacity: 1 }]}>
@@ -963,41 +1037,23 @@ const GameScreen = () => {
           </Animated.View>
         )}
 
-        {/* апгрейд-диалог */}
+        {/* апгрейд-диалог не показываем */}
         <View style={{ position: "relative", zIndex: 3000 }}>
           <CustomAlert
-            visible={showUpgradePrompt}
-            onClose={() => setShowUpgradePrompt(false)}
+            visible={false}
+            onClose={() => {}}
             title={
               <Text style={{ fontSize: 20, fontWeight: "bold", color: "#FFF" }}>
-                {language === "es" ? "¡Coincidencia!" : "Match!"}
+                Match!
               </Text>
             }
             message={
               <Text style={{ fontSize: 16, color: "#FFF" }}>
-                {language === "es"
-                  ? "¿Subir a un nivel más difícil?"
-                  : "Increase difficulty?"}
+                Increase difficulty?
               </Text>
             }
-            onYes={() => {
-              setShowUpgradePrompt(false);
-              const next = level === 4 ? 6 : level === 6 ? 8 : 10;
-              navigation.replace("GameScreen", { level: next });
-              setRoundsCompleted(0);
-              setMatchedCards([]);
-              setTime(0);
-              setMoves(0);
-              setTotalStars(0);
-              arcOffsetY.value = height;
-              arcOpacity.value = 0;
-              arcOffsetY.value = withTiming(0, { duration: 500 });
-              arcOpacity.value = withTiming(1, { duration: 500 });
-            }}
-            onNo={() => {
-              setShowUpgradePrompt(false);
-              generateCards();
-            }}
+            onYes={() => {}}
+            onNo={() => {}}
           />
         </View>
       </View>

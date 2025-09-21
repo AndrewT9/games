@@ -1,57 +1,87 @@
+// libs/tik-tack-toe-ui/src/lib/components/TicTacToe.tsx
 import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   StyleSheet,
   Dimensions,
   Animated,
-  Image,
   Text,
   Easing,
   ImageBackground,
   TouchableOpacity,
+  ImageSourcePropType,
+  StatusBar,
+  Platform,
 } from "react-native";
-import { StoreIcon } from "../assets/svg/store-icon";
 import { LinearGradient } from "expo-linear-gradient";
 import BackIcon from "../assets/svg/back-icon";
-import { TicTacToeProps } from "../types/tic-tac-toe";
+import type { TicTacToeProps } from "../types/tic-tac-toe";
+import type { Language } from "../types/props";
 import GameBoard from "./TicTacToe/GameBoard";
 import PlayerAvatar from "./TicTacToe/PlayerAvatar";
 import GameOverScreen from "./TicTacToe/GameOverScreen";
-import StartScreen from "./TicTacToe/StartScreen";
 import { useTicTacToeGame } from "../hooks/useTicTacToeGame";
 import { useTicTacToeAnimations } from "../hooks/useTicTacToeAnimations";
 import { useSound } from "../hooks/useSound";
+import * as ScreenOrientation from "expo-screen-orientation";
 
-const DEFAULT_PROPS = {
-  backgroundImage: require("../assets/WTP_BGS_ALL_0048.png"),
-  name1: "Player 1",
-  name2: "Player 2",
-  photo1: require("../assets/6.png"),
-  photo2: require("../assets/81.png"),
-  winGif: require("../assets/animations/success-animation.json"),
+/** Мини-словарик на будущее (если появятся подписи/кнопки). */
+const STRINGS: Record<Language, { langBadge: (code: Language) => string }> = {
+  en: { langBadge: (c) => c.toUpperCase() },
+  es: { langBadge: (c) => c.toUpperCase() },
+  uk: { langBadge: (c) => c.toUpperCase() },
+  de: { langBadge: (c) => c.toUpperCase() },
+  fr: { langBadge: (c) => c.toUpperCase() },
+  pl: { langBadge: (c) => c.toUpperCase() },
+  it: { langBadge: (c) => c.toUpperCase() },
+  pt: { langBadge: (c) => c.toUpperCase() },
 };
 
+const DEFAULTS = {
+  backgroundImage:
+    require("../assets/WTP_BGS_ALL_0048.png") as ImageSourcePropType,
+  name1: "Player 1",
+  name2: "Player 2",
+  photo1: require("../assets/6.png") as ImageSourcePropType,
+  photo2: require("../assets/81.png") as ImageSourcePropType,
+  winGif:
+    require("../assets/animations/success-animation.json") as ImageSourcePropType,
+  lang: "en" as Language,
+};
+
+const resolveImage = (src?: string | ImageSourcePropType) =>
+  typeof src === "string" ? { uri: src } : src;
+
 const TicTacToe: React.FC<TicTacToeProps> = (props) => {
+  // ✅ язык берём только из пропса (как в Magic Memory)
+  const lang: Language = props.lang ?? DEFAULTS.lang;
+  const L = STRINGS[lang] ?? STRINGS.en;
+
   const {
-    backgroundImage = DEFAULT_PROPS.backgroundImage,
-    name1 = DEFAULT_PROPS.name1,
-    name2 = DEFAULT_PROPS.name2,
-    photo1 = DEFAULT_PROPS.photo1,
-    photo2 = DEFAULT_PROPS.photo2,
-    winGif = DEFAULT_PROPS.winGif,
+    background,
+    userAvatar,
+    enemyCard,
+
+    // поддержка старых полей
+    backgroundImage = DEFAULTS.backgroundImage,
+    name1 = DEFAULTS.name1,
+    name2 = DEFAULTS.name2,
+    photo1 = DEFAULTS.photo1,
+    photo2 = DEFAULTS.photo2,
+    winGif = DEFAULTS.winGif,
   } = props;
 
-  const [moveCount, setMoveCount] = useState(0);
+  const resolvedBackground = background
+    ? { uri: background }
+    : resolveImage(backgroundImage);
+  const resolvedPhoto1 = userAvatar
+    ? { uri: userAvatar }
+    : resolveImage(photo1);
+  const resolvedPhoto2 = enemyCard ? { uri: enemyCard } : resolveImage(photo2);
+
   const [boardHeight, setBoardHeight] = useState<number>(0);
-  const [hasStarted, setHasStarted] = useState<boolean>(false);
-  const [showHint, setShowHint] = useState<boolean>(false);
-  const [isLoadingStory, setIsLoadingStory] = useState<boolean>(false);
-  const [storyLoaded, setStoryLoaded] = useState<boolean>(false);
 
-  const introAnim = useRef(new Animated.Value(0)).current;
-  const storyProgressAnimation = useRef(new Animated.Value(0)).current;
-  const storyLoadingIconRotation = useRef(new Animated.Value(0)).current;
-
+  // Звук
   const {
     playBackgroundMusic,
     stopBackgroundMusic,
@@ -62,28 +92,23 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     resumeBackgroundMusic,
   } = useSound();
 
+  // Логика игры
   const {
-    isGameStarted,
     setIsGameStarted,
     gameState,
     bestMove,
     gameComplete,
     handleCellPress,
-    undoLastTwoMoves,
     resetGame,
   } = useTicTacToeGame(playNotificationSound);
 
+  // Анимации
   const {
     player1Style,
     player2Style,
     gameContainerStyle,
     congratsContainerStyle,
     backIconStyle,
-    undoButtonStyle,
-    playButtonStyle,
-    animateBackIcon,
-    animateUndoButton,
-    animatePlayButton,
     resetAnimations,
   } = useTicTacToeAnimations(
     gameState.currentPlayer,
@@ -91,43 +116,115 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     gameComplete
   );
 
-  const handleResetGame = () => {
-    resetGame();
-    resetAnimations();
-    // Сброс анимаций кнопок/хинта/лоадера
-    hintScale.setValue(1);
-    setShowHint(false);
-    setIsLoadingStory(false);
-    setStoryLoaded(false);
-    setIsGameStarted(true);
-    storyProgressAnimation.setValue(0);
-    storyLoadingIconRotation.setValue(0);
-    // Музыка
-    playBackgroundMusic();
+  // Интро контента
+  const introAnim = useRef(new Animated.Value(0)).current;
+  const introStyle = {
+    opacity: introAnim,
+    transform: [
+      {
+        translateY: introAnim.interpolate({
+          inputRange: [0, 1],
+          outputRange: [20, 0],
+        }),
+      },
+    ],
   };
 
-  // Плавный вход основного контейнера
+  // Дуга (эллипс)
+  const ellipseTranslateY = useRef(
+    new Animated.Value(Dimensions.get("window").height)
+  ).current;
+  const ellipseOpacity = useRef(new Animated.Value(0)).current;
+
+  // Подсказка: микро-анимация
+  const hintScale = useRef(new Animated.Value(1)).current;
+  const hintAnimatedStyle = {
+    transform: [{ scale: hintScale }],
+    opacity: 1,
+  };
+  const animateHintButton = (toValue: number) => {
+    Animated.timing(hintScale, {
+      toValue,
+      duration: 100,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  // ⬇️ Скрываем статусбар + нижнюю навигацию (Android), как в MagicMemory
   useEffect(() => {
-    if (hasStarted) {
+    // StatusBar
+    StatusBar.setHidden(true, "none");
+
+    // Android Navigation Bar
+    (async () => {
+      if (Platform.OS === "android") {
+        try {
+          const NB: any = await import("expo-navigation-bar");
+          try {
+            await NB.setBackgroundColorAsync("#16103E");
+          } catch {}
+          try {
+            await NB.setVisibilityAsync("hidden");
+          } catch {}
+          try {
+            await NB.setBehaviorAsync("inset-swipe");
+          } catch {}
+        } catch (err) {
+          console.warn("NavigationBar import/ops error:", err);
+        }
+      }
+    })();
+
+    // Повторно скрываем навбар при смене размеров/ориентации
+    const sub = Dimensions.addEventListener("change", async () => {
+      if (Platform.OS === "android") {
+        try {
+          const NB: any = await import("expo-navigation-bar");
+          await NB.setVisibilityAsync("hidden");
+        } catch {}
+      }
+    });
+
+    return () => {
+      // Возвращаем, если нужно (внутри песочницы обычно ок оставить скрытым,
+      // но для чистоты вернём как было)
+      StatusBar.setHidden(false, "none");
+      if (Platform.OS === "android") {
+        (async () => {
+          try {
+            const NB: any = await import("expo-navigation-bar");
+            await NB.setVisibilityAsync("visible");
+          } catch {}
+        })();
+      }
+      // @ts-ignore — совместимость API RN <-> Expo SDK
+      sub?.remove?.();
+    };
+  }, []);
+
+  // Старт: сразу LANDSCAPE, музыка, анимации
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await ScreenOrientation.lockAsync(
+          ScreenOrientation.OrientationLock.LANDSCAPE
+        );
+      } catch {}
+      playBackgroundMusic();
+      setIsGameStarted(true);
+
       introAnim.setValue(0);
       Animated.timing(introAnim, {
         toValue: 1,
         duration: 500,
         useNativeDriver: true,
       }).start(() => {
-        resetAnimations();
+        if (mounted) resetAnimations();
       });
-    }
-  }, [hasStarted, introAnim, resetAnimations]);
 
-  // Анимация дуги (ellipse)
-  const ellipseTranslateY = useRef(
-    new Animated.Value(Dimensions.get("window").height)
-  ).current;
-  const ellipseOpacity = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    if (hasStarted) {
+      ellipseTranslateY.setValue(Dimensions.get("window").height);
+      ellipseOpacity.setValue(0);
       Animated.parallel([
         Animated.timing(ellipseTranslateY, {
           toValue: 0,
@@ -142,143 +239,69 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
           useNativeDriver: true,
         }),
       ]).start();
-    } else {
-      ellipseTranslateY.setValue(Dimensions.get("window").height);
-      ellipseOpacity.setValue(0);
-    }
-  }, [hasStarted, ellipseTranslateY, ellipseOpacity]);
-
-  // Лок ориентации в landscape (мягко, если модуль есть)
-  useEffect(() => {
-    (async () => {
-      try {
-        const SO = await import("expo-screen-orientation");
-        if (hasStarted) {
-          await SO.lockAsync(SO.OrientationLock.LANDSCAPE);
-        } else {
-          await SO.unlockAsync();
-        }
-      } catch {
-        // нет модуля — пропускаем
-      }
     })();
-  }, [hasStarted]);
 
-  // Лоадер «истории»
-  useEffect(() => {
-    if (hasStarted && !storyLoaded) {
-      setIsLoadingStory(true);
-      storyProgressAnimation.setValue(0);
-      storyLoadingIconRotation.setValue(0);
+    return () => {
+      mounted = false;
+      stopBackgroundMusic();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      const rotationLoop = Animated.loop(
-        Animated.timing(storyLoadingIconRotation, {
-          toValue: 1,
-          duration: 1200,
-          useNativeDriver: true,
-        })
-      );
-      rotationLoop.start();
+  // Сброс (Play Again)
+  const handleResetGame = () => {
+    resetGame();
+    resetAnimations();
+    hintScale.setValue(1);
+    setIsGameStarted(true);
+    playBackgroundMusic();
 
-      const progressLoop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(storyProgressAnimation, {
-            toValue: 1,
-            duration: 2000,
-            useNativeDriver: false,
-            easing: Easing.linear,
-          }),
-          Animated.timing(storyProgressAnimation, {
-            toValue: 0,
-            duration: 0,
-            useNativeDriver: false,
-          }),
-        ])
-      );
-      progressLoop.start();
-
-      return () => {
-        rotationLoop.stop();
-        progressLoop.stop();
-      };
-    }
-    return undefined;
-  }, [
-    hasStarted,
-    storyLoaded,
-    storyLoadingIconRotation,
-    storyProgressAnimation,
-  ]);
-
-  const storyProgressWidth = storyProgressAnimation.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["0%", "100%"],
-  });
-
-  const handlePlayStory = () => {
-    // твоя логика проигрывания истории
-    console.log("Playing story...");
-  };
-
-  const introStyle = {
-    opacity: introAnim,
-    transform: [
-      {
-        translateY: introAnim.interpolate({
-          inputRange: [0, 1],
-          outputRange: [20, 0],
-        }),
-      },
-    ],
-  };
-
-  const hintScale = useRef(new Animated.Value(1)).current;
-  const hintAnimatedStyle = {
-    transform: [{ scale: hintScale }],
-    opacity: 1,
-  };
-  const animateHintButton = (toValue: number) => {
-    Animated.timing(hintScale, {
-      toValue,
-      duration: 100,
+    introAnim.setValue(0);
+    Animated.timing(introAnim, {
+      toValue: 1,
+      duration: 400,
       useNativeDriver: true,
     }).start();
+
+    ellipseTranslateY.setValue(20);
+    Animated.parallel([
+      Animated.timing(ellipseTranslateY, {
+        toValue: 0,
+        duration: 600,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(ellipseOpacity, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }),
+    ]).start();
   };
 
-  const handleBackToStart = () => {
+  // “Назад” — мягкий ресет (старт и лоадинг выпилены)
+  const handleBackSoftReset = () => {
     Animated.timing(introAnim, {
       toValue: 0,
-      duration: 500,
+      duration: 300,
       useNativeDriver: true,
     }).start(() => {
       handleResetGame();
-      setHasStarted(false);
-      introAnim.setValue(0);
-      resetAnimations();
-      setIsLoadingStory(false);
-      setStoryLoaded(false);
-      storyProgressAnimation.setValue(0);
-      storyLoadingIconRotation.setValue(0);
-      stopBackgroundMusic();
     });
   };
 
   return (
     <ImageBackground
-      source={backgroundImage}
+      source={resolvedBackground}
       style={styles.container}
       testID="tic-tac-toe-game"
     >
       <Animated.View
-        style={[
-          styles.gameContainer,
-          hasStarted ? introStyle : null,
-          gameContainerStyle,
-        ]}
+        style={[styles.gameContainer, introStyle, gameContainerStyle]}
         testID="game-content"
       >
         <View>
-          {/* ДУГА: как было — cover, на всю высоту */}
+          {/* ДУГА */}
           <Animated.Image
             source={require("../assets/ellipse.png")}
             style={{
@@ -303,7 +326,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
           >
             <View style={{ marginRight: 20 }}>
               <PlayerAvatar
-                photo={photo1}
+                photo={resolvedPhoto1}
                 name={name1}
                 player="X"
                 currentPlayer={gameState.currentPlayer}
@@ -320,21 +343,18 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
               onCellPress={handleCellPress}
               winningLine={gameState.winningLine}
               bestMove={bestMove}
-              photo1={photo1}
-              photo2={photo2}
-              onMoveCountChange={setMoveCount}
-              onLayout={(event) =>
-                setBoardHeight(event.nativeEvent.layout.height)
-              }
-              showHint={showHint}
-              onHintUsed={() => setShowHint(false)}
+              photo1={resolvedPhoto1}
+              photo2={resolvedPhoto2}
+              onLayout={(e) => setBoardHeight(e.nativeEvent.layout.height)}
+              showHint={false}
+              onHintUsed={() => {}}
               onVictory={playVictorySound}
               onBotVictory={() => playSadGameSound()}
             />
 
             <View style={{ marginLeft: 20 }}>
               <PlayerAvatar
-                photo={photo2}
+                photo={resolvedPhoto2}
                 name={name2}
                 player="O"
                 currentPlayer={gameState.currentPlayer}
@@ -348,100 +368,34 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
           </Animated.View>
         </View>
 
-        {/* Top bar icons */}
+        {/* Верхняя панель */}
         <View style={styles.topBar} pointerEvents="box-none">
           <Animated.View style={[styles.backButton, backIconStyle]}>
             <TouchableOpacity
               activeOpacity={1}
-              onPressIn={() => animateBackIcon(0.9)}
+              onPressIn={() => {
+                Animated.spring(hintScale, {
+                  toValue: 0.96,
+                  useNativeDriver: true,
+                }).start();
+              }}
               onPressOut={() => {
-                animateBackIcon(1);
-                setHasStarted(false);
-                setIsGameStarted(false);
+                Animated.spring(hintScale, {
+                  toValue: 1,
+                  useNativeDriver: true,
+                }).start();
+                handleBackSoftReset();
               }}
             >
               <BackIcon />
             </TouchableOpacity>
           </Animated.View>
 
-          {/* Центральная часть topbar */}
-          {hasStarted && (
+          {!!lang && (
             <View style={styles.centerTopBar}>
-              {isLoadingStory ? (
-                <View style={styles.storyLoadingContainer}>
-                  <LinearGradient
-                    colors={["#7500D1", "#C780FF"]}
-                    start={{ x: 0, y: 0.5 }}
-                    end={{ x: 1, y: 0.5 }}
-                    style={styles.storyProgressBarBorder}
-                  >
-                    <View style={styles.storyProgressInner}>
-                      <View style={styles.storyProgressTrack}>
-                        <Animated.View
-                          style={[
-                            styles.storyProgressFillWrapper,
-                            { width: storyProgressWidth },
-                          ]}
-                        >
-                          <LinearGradient
-                            colors={["#7500D1", "#7500D1"]}
-                            start={{ x: 0, y: 0.5 }}
-                            end={{ x: 1, y: 0.5 }}
-                            style={StyleSheet.absoluteFill}
-                          />
-                        </Animated.View>
-
-                        <View
-                          style={styles.storyProgressContentOverlay}
-                          pointerEvents="none"
-                        >
-                          <View style={styles.storyLoadingRowInsideBar}>
-                            <Animated.Image
-                              source={require("../assets/clock.png")}
-                              style={{
-                                width: 24,
-                                height: 24,
-                                marginRight: 8,
-                                transform: [
-                                  {
-                                    rotate:
-                                      storyLoadingIconRotation.interpolate({
-                                        inputRange: [0, 1],
-                                        outputRange: ["0deg", "360deg"],
-                                      }),
-                                  },
-                                ],
-                              }}
-                              resizeMode="contain"
-                            />
-                            <Text style={styles.storyLoadingTextInside}>
-                              Loading story...
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-                    </View>
-                  </LinearGradient>
-                </View>
-              ) : storyLoaded ? (
-                <TouchableOpacity
-                  style={styles.playStoryButton}
-                  onPress={handlePlayStory}
-                  activeOpacity={0.8}
-                >
-                  <LinearGradient
-                    colors={["#C780FF", "#7500D1"]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 0, y: 1 }}
-                    style={styles.playStoryButtonGradient}
-                  >
-                    <Text style={styles.playStoryText}>Play story</Text>
-                    <View style={styles.playStoryIconContainer}>
-                      <StoreIcon />
-                    </View>
-                  </LinearGradient>
-                </TouchableOpacity>
-              ) : null}
+              <Text style={{ color: "#fff", fontFamily: "Fredoka" }}>
+                {L.langBadge(lang)}
+              </Text>
             </View>
           )}
 
@@ -450,7 +404,12 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
               activeOpacity={1}
               onPressIn={() => animateHintButton(0.9)}
               onPressOut={() => animateHintButton(1)}
-              onPress={() => setShowHint(true)}
+              onPress={() => {
+                // Простая подсказка: звук + небольшой “пульс” кнопки
+                playNotificationSound();
+                animateHintButton(1.08);
+                setTimeout(() => animateHintButton(1), 120);
+              }}
             >
               <View style={styles.hintGlow}>
                 <View style={styles.hintBorder}>
@@ -465,67 +424,63 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
             </TouchableOpacity>
           </Animated.View>
         </View>
-
-        {moveCount >= 2 && (
-          <View style={styles.imageContainer} pointerEvents="box-none">
-            <Animated.View style={undoButtonStyle}>
-              <TouchableOpacity
-                onPress={undoLastTwoMoves}
-                activeOpacity={1}
-                onPressIn={() => animateUndoButton(0.9)}
-                onPressOut={() => animateUndoButton(1)}
-                testID="back-button"
-              >
-                <Image
-                  source={require("../assets/back_board.png")}
-                  style={styles.backIcon}
-                  resizeMode="contain"
-                />
-              </TouchableOpacity>
-            </Animated.View>
-          </View>
-        )}
       </Animated.View>
 
       <GameOverScreen
         winner={gameState.winner}
         gameComplete={gameComplete}
-        winGif={winGif}
+        winGif={resolveImage(winGif)}
         onPlayAgain={handleResetGame}
         animatedStyle={congratsContainerStyle}
         onPauseBackground={pauseBackgroundMusic}
         onResumeBackground={resumeBackgroundMusic}
+        lang={lang}
       />
-
-      {!hasStarted && (
-        <View style={styles.startScreenContainer}>
-          <StartScreen
-            onStart={() => {
-              setHasStarted(true);
-              setIsGameStarted(true);
-              handleResetGame();
-            }}
-            playButtonStyle={playButtonStyle}
-            animatePlayButton={animatePlayButton}
-            onStartBackgroundMusic={playBackgroundMusic}
-          />
-        </View>
-      )}
     </ImageBackground>
   );
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1, width: "100%", height: "100%" },
-  backIcon: { width: 75, height: 75 },
-  imageContainer: {
-    position: "absolute",
-    top: "20%",
-    bottom: 0,
-    right: 30,
+  gameContainer: { flex: 1, justifyContent: "center", height: "80%" },
+  playersContainer: {
+    flexDirection: "row",
     justifyContent: "center",
-    alignItems: "flex-end",
-    zIndex: 20,
+    paddingHorizontal: 20,
+    marginTop: "10%",
+  },
+  topBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 1100,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  backButton: {
+    position: "absolute",
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(18, 18, 18, 0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+    top: 34,
+    left: 30,
+    zIndex: 1000,
+  },
+  centerTopBar: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: 50,
+    transform: [{ translateY: -26 }],
+    top: 54,
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 980,
   },
   hintButton: {
     position: "absolute",
@@ -548,11 +503,6 @@ const styles = StyleSheet.create({
     shadowColor: "rgba(144, 33, 232, 0.8)",
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.8,
-  },
-  storyProgressInner: {
-    flex: 1,
-    borderRadius: 18,
-    overflow: "hidden",
   },
   hintBorder: {
     width: 40,
@@ -577,138 +527,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontFamily: "FredokaSemiBold",
     textAlign: "center",
-  },
-  gameContainer: { flex: 1, justifyContent: "center", height: "80%" },
-  playersContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
-    paddingHorizontal: 20,
-    marginTop: "10%",
-  },
-  startScreenContainer: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 1000,
-  },
-  topBar: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 1100,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  backButton: {
-    position: "absolute",
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(18, 18, 18, 0.6)",
-    justifyContent: "center",
-    alignItems: "center",
-    top: 34,
-    left: 30,
-    zIndex: 1000,
-  },
-  iconButton: { padding: 6 },
-  topIconQuest: { width: 110, height: 110 },
-  centerTopBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    height: 50,
-    transform: [{ translateY: -26 }],
-    top: 54,
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 980,
-  },
-  storyLoadingContainer: {
-    width: 420,
-    height: 28,
-    borderRadius: 20,
-    overflow: "hidden",
-  },
-  storyProgressBarBorder: {
-    width: "100%",
-    height: "100%",
-    zIndex: 1000,
-    borderRadius: 20,
-    padding: 2,
-  },
-  storyProgressTrack: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 20,
-    backgroundColor: "#57406a",
-  },
-  storyProgressFillWrapper: {
-    height: "100%",
-    borderRadius: 20,
-    overflow: "hidden",
-  },
-  storyProgressFill: {
-    height: "100%",
-    borderRadius: 20,
-    backgroundColor: "rgba(255, 255, 255, 0.8)",
-  },
-  storyProgressContentOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 1,
-  },
-  storyLoadingRowInsideBar: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  storyLoadingTextInside: {
-    color: "#FFF",
-    fontSize: 12,
-    fontFamily: "FredokaSemiBold",
-  },
-  playStoryButton: {
-    width: 212,
-    borderRadius: 25,
-    justifyContent: "center",
-    alignItems: "center",
-    flexDirection: "row",
-    borderWidth: 3,
-    borderColor: "#C57CFF",
-    shadowColor: "#9021E8CC",
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 1,
-    shadowRadius: 25,
-    elevation: 10,
-  },
-  playStoryButtonGradient: {
-    flex: 1,
-    height: 52,
-    flexDirection: "row",
-    justifyContent: "center",
-    borderRadius: 22,
-    paddingTop: 12,
-  },
-  playStoryText: {
-    color: "#FFF",
-    fontSize: 18,
-    fontFamily: "Fredoka",
-    marginRight: 10,
-  },
-  playStoryIconContainer: {
-    width: 24,
-    height: 24,
-    justifyContent: "center",
-    alignItems: "center",
   },
 });
 

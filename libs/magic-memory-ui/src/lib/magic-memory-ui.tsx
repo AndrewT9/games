@@ -7,7 +7,7 @@ import type { MagicMemoryPropConfig } from "./types/props";
 
 /**
  * Импорт снаружи:
- *   import { MagicMemory } from '@AndrewT9/magic-memory-ui';
+ *   import { MagicMemory } from '@valerii1984/magic-memory-ui';
  * Использование:
  *   <MagicMemory props={...} />
  */
