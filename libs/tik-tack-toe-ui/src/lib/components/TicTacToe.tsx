@@ -14,7 +14,8 @@ import {
   Platform,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import BackIcon from "../assets/svg/back-icon";
+// import BackIcon from "../assets/svg/back-icon"; // ⛔️ Бэк удалён
+// Типы (оставляю импорт, если у тебя используется где-то ещё)
 import type { TicTacToeProps } from "../types/tic-tac-toe";
 import type { Language } from "../types/props";
 import GameBoard from "./TicTacToe/GameBoard";
@@ -25,7 +26,14 @@ import { useTicTacToeAnimations } from "../hooks/useTicTacToeAnimations";
 import { useSound } from "../hooks/useSound";
 import * as ScreenOrientation from "expo-screen-orientation";
 
-/** Мини-словарик на будущее (если появятся подписи/кнопки). */
+/** ───────────── Флаги управления ─────────────
+ * Фоновая музыка «припрятана»: не стартует, пока флаг false.
+ * Бейдж языка скрыт: показывается только при true.
+ */
+const ENABLE_BACKGROUND_MUSIC = false;
+const SHOW_LANG_BADGE = false;
+
+/** Мини-словарик для бейджа языка. */
 const STRINGS: Record<Language, { langBadge: (code: Language) => string }> = {
   en: { langBadge: (c) => c.toUpperCase() },
   es: { langBadge: (c) => c.toUpperCase() },
@@ -44,17 +52,44 @@ const DEFAULTS = {
   name2: "Player 2",
   photo1: require("../assets/6.png") as ImageSourcePropType,
   photo2: require("../assets/81.png") as ImageSourcePropType,
-  winGif:
-    require("../assets/animations/success-animation.json") as ImageSourcePropType,
+  // Lottie json
+  winGif: require("../assets/animations/success-animation.json") as any,
   lang: "en" as Language,
 };
 
 const resolveImage = (src?: string | ImageSourcePropType) =>
   typeof src === "string" ? { uri: src } : src;
 
-const TicTacToe: React.FC<TicTacToeProps> = (props) => {
+/** Поддержка короткого пропса `props`, как в MagicMemory */
+type ShortProps = {
+  props?: {
+    lang?: Language;
+    background?: string;
+    userAvatar?: string;
+    enemyCard?: string;
+  };
+  // + бэккомпат, если кто-то ещё передаёт напрямую
+  lang?: Language;
+  background?: string;
+  userAvatar?: string;
+  enemyCard?: string;
+
+  // старые поля (бэккомпат)
+  backgroundImage?: ImageSourcePropType;
+  name1?: string;
+  name2?: string;
+  photo1?: ImageSourcePropType;
+  photo2?: ImageSourcePropType;
+  winGif?: any;
+};
+
+const TicTacToe: React.FC<ShortProps> = (rawProps) => {
+  // Нормализуем вход: либо rawProps.props, либо сами rawProps
+  const p = (rawProps.props ?? rawProps) as Required<ShortProps>["props"] &
+    Omit<ShortProps, "props">;
+
   // ✅ язык берём только из пропса (как в Magic Memory)
-  const lang: Language = props.lang ?? DEFAULTS.lang;
+  const lang: Language = (p.lang as Language) ?? DEFAULTS.lang;
   const L = STRINGS[lang] ?? STRINGS.en;
 
   const {
@@ -69,7 +104,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     photo1 = DEFAULTS.photo1,
     photo2 = DEFAULTS.photo2,
     winGif = DEFAULTS.winGif,
-  } = props;
+  } = p as any;
 
   const resolvedBackground = background
     ? { uri: background }
@@ -80,6 +115,22 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
   const resolvedPhoto2 = enemyCard ? { uri: enemyCard } : resolveImage(photo2);
 
   const [boardHeight, setBoardHeight] = useState<number>(0);
+
+  // Подсказка (hint)
+  const [showHint, setShowHint] = useState(false);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Держим высоту экрана, чтобы опустить кнопку "?" к середине
+  const [screenH, setScreenH] = useState(Dimensions.get("window").height);
+  useEffect(() => {
+    const sub = Dimensions.addEventListener("change", ({ window }) => {
+      setScreenH(window.height);
+    });
+    return () => {
+      // @ts-ignore
+      sub?.remove?.();
+    };
+  }, []);
 
   // Звук
   const {
@@ -100,7 +151,10 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     gameComplete,
     handleCellPress,
     resetGame,
-  } = useTicTacToeGame(playNotificationSound);
+  } = useTicTacToeGame(() => {
+    // звук клика по клетке / системное уведомление
+    playNotificationSound();
+  });
 
   // Анимации
   const {
@@ -108,7 +162,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     player2Style,
     gameContainerStyle,
     congratsContainerStyle,
-    backIconStyle,
+    // backIconStyle, // ⛔️ бэка нет
     resetAnimations,
   } = useTicTacToeAnimations(
     gameState.currentPlayer,
@@ -136,7 +190,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
   ).current;
   const ellipseOpacity = useRef(new Animated.Value(0)).current;
 
-  // Подсказка: микро-анимация
+  // Подсказка: микро-анимация кнопки
   const hintScale = useRef(new Animated.Value(1)).current;
   const hintAnimatedStyle = {
     transform: [{ scale: hintScale }],
@@ -186,8 +240,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     });
 
     return () => {
-      // Возвращаем, если нужно (внутри песочницы обычно ок оставить скрытым,
-      // но для чистоты вернём как было)
+      // Возвращаем, если нужно
       StatusBar.setHidden(false, "none");
       if (Platform.OS === "android") {
         (async () => {
@@ -202,7 +255,7 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     };
   }, []);
 
-  // Старт: сразу LANDSCAPE, музыка, анимации
+  // Старт: LANDSCAPE, музыка, анимации
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -211,7 +264,10 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
           ScreenOrientation.OrientationLock.LANDSCAPE
         );
       } catch {}
-      playBackgroundMusic();
+      // 🔇 BGM припрятана:
+      if (ENABLE_BACKGROUND_MUSIC) {
+        playBackgroundMusic();
+      }
       setIsGameStarted(true);
 
       introAnim.setValue(0);
@@ -242,19 +298,28 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
     })();
 
     return () => {
-      mounted = false;
+      // Останавливаем на выходе
       stopBackgroundMusic();
+      let t = hintTimerRef.current;
+      if (t) clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Сброс (Play Again)
   const handleResetGame = () => {
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    setShowHint(false);
+
     resetGame();
     resetAnimations();
     hintScale.setValue(1);
     setIsGameStarted(true);
-    playBackgroundMusic();
+
+    // 🔇 По умолчанию не включаем BGM
+    if (ENABLE_BACKGROUND_MUSIC) {
+      playBackgroundMusic();
+    }
 
     introAnim.setValue(0);
     Animated.timing(introAnim, {
@@ -277,17 +342,6 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
         useNativeDriver: true,
       }),
     ]).start();
-  };
-
-  // “Назад” — мягкий ресет (старт и лоадинг выпилены)
-  const handleBackSoftReset = () => {
-    Animated.timing(introAnim, {
-      toValue: 0,
-      duration: 300,
-      useNativeDriver: true,
-    }).start(() => {
-      handleResetGame();
-    });
   };
 
   return (
@@ -346,8 +400,9 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
               photo1={resolvedPhoto1}
               photo2={resolvedPhoto2}
               onLayout={(e) => setBoardHeight(e.nativeEvent.layout.height)}
-              showHint={false}
-              onHintUsed={() => {}}
+              // ✅ ключевое — проводка подсказки
+              showHint={showHint}
+              onHintUsed={() => setShowHint(false)}
               onVictory={playVictorySound}
               onBotVictory={() => playSadGameSound()}
             />
@@ -368,30 +423,9 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
           </Animated.View>
         </View>
 
-        {/* Верхняя панель */}
+        {/* Верхняя панель (без Back) */}
         <View style={styles.topBar} pointerEvents="box-none">
-          <Animated.View style={[styles.backButton, backIconStyle]}>
-            <TouchableOpacity
-              activeOpacity={1}
-              onPressIn={() => {
-                Animated.spring(hintScale, {
-                  toValue: 0.96,
-                  useNativeDriver: true,
-                }).start();
-              }}
-              onPressOut={() => {
-                Animated.spring(hintScale, {
-                  toValue: 1,
-                  useNativeDriver: true,
-                }).start();
-                handleBackSoftReset();
-              }}
-            >
-              <BackIcon />
-            </TouchableOpacity>
-          </Animated.View>
-
-          {!!lang && (
+          {SHOW_LANG_BADGE && !!lang && (
             <View style={styles.centerTopBar}>
               <Text style={{ color: "#fff", fontFamily: "Fredoka" }}>
                 {L.langBadge(lang)}
@@ -399,16 +433,29 @@ const TicTacToe: React.FC<TicTacToeProps> = (props) => {
             </View>
           )}
 
-          <Animated.View style={[styles.hintButton, hintAnimatedStyle]}>
+          {/* Кнопка подсказки — опущена к середине экрана */}
+          <Animated.View
+            style={[
+              styles.hintButton,
+              hintAnimatedStyle,
+              { top: Math.max(34, Math.round(screenH / 2 - 20)) },
+            ]}
+          >
             <TouchableOpacity
               activeOpacity={1}
               onPressIn={() => animateHintButton(0.9)}
               onPressOut={() => animateHintButton(1)}
               onPress={() => {
-                // Простая подсказка: звук + небольшой “пульс” кнопки
                 playNotificationSound();
                 animateHintButton(1.08);
-                setTimeout(() => animateHintButton(1), 120);
+
+                // Показать подсказку и авто-скрыть
+                setShowHint(true);
+                if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+                hintTimerRef.current = setTimeout(
+                  () => setShowHint(false),
+                  2500
+                );
               }}
             >
               <View style={styles.hintGlow}>
@@ -459,18 +506,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  backButton: {
-    position: "absolute",
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(18, 18, 18, 0.6)",
-    justifyContent: "center",
-    alignItems: "center",
-    top: 34,
-    left: 30,
-    zIndex: 1000,
-  },
   centerTopBar: {
     position: "absolute",
     left: 0,
@@ -490,7 +525,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     zIndex: 1000,
-    top: 34,
+    // top задаётся динамически, right фиксируем:
     right: 30,
   },
   hintGlow: {
